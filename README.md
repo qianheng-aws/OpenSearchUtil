@@ -378,11 +378,15 @@ python -m benchmark.graphlookup_benchmark
 
 # With custom configuration
 python -m benchmark.graphlookup_benchmark \
-    --vertex-index person \
-    --edge-index connection \
-    --max-depths "0,1,5,10,20,50" \
-    --directions "uni,bi" \
-    --output report.json
+          --vertex-index person \
+          --edge-index person_knows_person \
+          --start-field id \
+          --from-field target \
+          --to-field source \
+          --num-start-values 5 \
+          --runs-per-test 3 \
+          --max-depths "0,1,3,5,10" \
+          --directions "uni,bi" 2>&1
 ```
 
 See source files for full documentation.
