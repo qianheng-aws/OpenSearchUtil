@@ -54,6 +54,20 @@ class BenchmarkResult:
     error: Optional[str] = None
 
 
+@dataclass
+class MultiValueBenchmarkResult:
+    """Result of a multi-value benchmark run."""
+    num_start_values: int
+    start_values: List[Any]
+    max_depth: int
+    direction: str
+    latencies: List[float]
+    median_latency: float
+    edge_count: int
+    node_count: int
+    error: Optional[str] = None
+
+
 class GraphLookupBenchmark:
     """
     Benchmark class for OpenSearch PPL graphLookup command.
@@ -269,6 +283,262 @@ class GraphLookupBenchmark:
             error=error
         )
 
+    def run_multivalue_graphlookup_query(self, start_values: List[Any], max_depth: int, direction: str) -> Tuple[float, int, int]:
+        """
+        Run a graphLookup query with multiple start values using IN clause.
+
+        Args:
+            start_values: List of starting vertex IDs
+            max_depth: Maximum traversal depth
+            direction: Traversal direction ('uni' or 'bi')
+
+        Returns:
+            Tuple of (latency_ms, edge_count, node_count)
+        """
+        # Build IN clause: where id in (val1, val2, ...)
+        values_str = ', '.join(str(v) for v in start_values)
+
+        query = f"""source={self.config.vertex_index}
+| where {self.config.start_field} in ({values_str})
+| graphLookup {self.config.edge_index}
+    startField={self.config.start_field}
+    fromField={self.config.from_field}
+    toField={self.config.to_field}
+    depthField=depth
+    batchMode=true
+    maxDepth={max_depth}
+    direction={direction}
+    as reports
+| fields reports"""
+
+        start_time = time.perf_counter()
+        result = self.execute_ppl(query)
+        end_time = time.perf_counter()
+
+        latency_ms = (end_time - start_time) * 1000
+
+        # Extract edge count and node count from all reports rows
+        total_edge_count = 0
+        all_nodes = set()
+
+        if 'datarows' in result:
+            for row in result['datarows']:
+                if row and row[0]:
+                    reports = row[0]
+                    if reports and isinstance(reports, list):
+                        total_edge_count += len(reports)
+
+                        # Extract unique nodes from edges
+                        for report in reports:
+                            if isinstance(report, str):
+                                try:
+                                    parts = report.strip('{}').split(',')
+                                    if len(parts) >= 3:
+                                        source = parts[1].strip()
+                                        target = parts[2].strip()
+                                        all_nodes.add(source)
+                                        all_nodes.add(target)
+                                except Exception:
+                                    pass
+                            elif isinstance(report, dict):
+                                if 'source' in report:
+                                    all_nodes.add(str(report['source']))
+                                if 'target' in report:
+                                    all_nodes.add(str(report['target']))
+                                if self.config.to_field in report:
+                                    all_nodes.add(str(report[self.config.to_field]))
+                                if self.config.from_field in report:
+                                    all_nodes.add(str(report[self.config.from_field]))
+
+        return latency_ms, total_edge_count, len(all_nodes)
+
+    def benchmark_multivalue_config(self, start_values: List[Any], max_depth: int, direction: str) -> MultiValueBenchmarkResult:
+        """
+        Run benchmark for a multi-value configuration.
+
+        Args:
+            start_values: List of starting vertex IDs
+            max_depth: Maximum traversal depth
+            direction: Traversal direction
+
+        Returns:
+            MultiValueBenchmarkResult with latency statistics
+        """
+        latencies = []
+        edge_count = 0
+        node_count = 0
+        error = None
+
+        for run in range(self.config.runs_per_test):
+            try:
+                latency, edges, nodes = self.run_multivalue_graphlookup_query(start_values, max_depth, direction)
+                latencies.append(latency)
+                edge_count = edges
+                node_count = nodes
+                self.logger.debug(f"  Run {run + 1}: {latency:.2f}ms, edges={edges}, nodes={nodes}")
+            except Exception as e:
+                error = str(e)
+                self.logger.warning(f"  Run {run + 1} failed: {e}")
+
+        median_latency = statistics.median(latencies) if latencies else 0
+
+        return MultiValueBenchmarkResult(
+            num_start_values=len(start_values),
+            start_values=start_values,
+            max_depth=max_depth,
+            direction=direction,
+            latencies=latencies,
+            median_latency=median_latency,
+            edge_count=edge_count,
+            node_count=node_count,
+            error=error
+        )
+
+    def run_multivalue_benchmark(self, max_depth: int = 3) -> List[MultiValueBenchmarkResult]:
+        """
+        Run multi-value benchmark: incrementally add start values and measure performance.
+
+        Args:
+            max_depth: Fixed maxDepth for all tests (default: 3)
+
+        Returns:
+            List of MultiValueBenchmarkResult for each batch size
+        """
+        self.logger.info("=" * 60)
+        self.logger.info("Starting Multi-Value GraphLookup Benchmark")
+        self.logger.info("=" * 60)
+        self.logger.info(f"Vertex Index: {self.config.vertex_index}")
+        self.logger.info(f"Edge Index: {self.config.edge_index}")
+        self.logger.info(f"Fixed maxDepth: {max_depth}")
+        self.logger.info(f"Directions: {self.config.directions}")
+        self.logger.info(f"Runs per test: {self.config.runs_per_test}")
+        self.logger.info(f"Max start values: {self.config.num_start_values}")
+        self.logger.info("=" * 60)
+
+        # Get random start values
+        all_start_values = self.get_random_start_values()
+
+        if not all_start_values:
+            self.logger.error("No start values found. Aborting benchmark.")
+            return []
+
+        results = []
+        total_tests = len(all_start_values) * len(self.config.directions)
+        current_test = 0
+
+        for direction in self.config.directions:
+            self.logger.info(f"\n{'=' * 40}")
+            self.logger.info(f"Testing direction: {direction}")
+            self.logger.info(f"{'=' * 40}")
+
+            # Incrementally add start values: 1, 2, 3, ..., num_start_values
+            for num_values in range(1, len(all_start_values) + 1):
+                current_test += 1
+                start_values_subset = all_start_values[:num_values]
+
+                self.logger.info(f"\n[{current_test}/{total_tests}] "
+                                f"num_start_values={num_values}, maxDepth={max_depth}, direction={direction}")
+                self.logger.info(f"  Start values: {start_values_subset}")
+
+                result = self.benchmark_multivalue_config(start_values_subset, max_depth, direction)
+                results.append(result)
+
+                self.logger.info(f"  Median latency: {result.median_latency:.2f}ms, "
+                                f"Edges: {result.edge_count}, Nodes: {result.node_count}")
+
+        return results
+
+    def generate_multivalue_report(self, results: List[MultiValueBenchmarkResult], max_depth: int = 3) -> Dict:
+        """
+        Generate a summary report from multi-value benchmark results.
+
+        Args:
+            results: List of MultiValueBenchmarkResult
+            max_depth: The fixed maxDepth used
+
+        Returns:
+            Summary report as dictionary
+        """
+        report = {
+            'timestamp': datetime.now().isoformat(),
+            'benchmark_type': 'multivalue',
+            'config': {
+                'vertex_index': self.config.vertex_index,
+                'edge_index': self.config.edge_index,
+                'max_depth': max_depth,
+                'max_start_values': self.config.num_start_values,
+                'runs_per_test': self.config.runs_per_test,
+                'directions': self.config.directions
+            },
+            'summary': {},
+            'details': []
+        }
+
+        # Group results by direction
+        for direction in self.config.directions:
+            report['summary'][direction] = {}
+
+            for num_values in range(1, self.config.num_start_values + 1):
+                matching_results = [
+                    r for r in results
+                    if r.direction == direction and r.num_start_values == num_values
+                ]
+
+                if matching_results:
+                    r = matching_results[0]
+                    report['summary'][direction][num_values] = {
+                        'median_latency_ms': r.median_latency,
+                        'edge_count': r.edge_count,
+                        'node_count': r.node_count
+                    }
+
+        # Add detailed results
+        for r in results:
+            report['details'].append({
+                'num_start_values': r.num_start_values,
+                'start_values': r.start_values,
+                'max_depth': r.max_depth,
+                'direction': r.direction,
+                'median_latency_ms': r.median_latency,
+                'all_latencies_ms': r.latencies,
+                'edge_count': r.edge_count,
+                'node_count': r.node_count,
+                'error': r.error
+            })
+
+        return report
+
+    def print_multivalue_summary_table(self, results: List[MultiValueBenchmarkResult]):
+        """
+        Print a summary table of multi-value benchmark results.
+
+        Args:
+            results: List of MultiValueBenchmarkResult
+        """
+        print("\n" + "=" * 90)
+        print("MULTI-VALUE BENCHMARK SUMMARY")
+        print("=" * 90)
+
+        for direction in self.config.directions:
+            print(f"\n--- Direction: {direction} ---")
+            print(f"{'# Values':<12} {'Median Latency (ms)':<22} {'Edges':<15} {'Nodes':<15}")
+            print("-" * 90)
+
+            for num_values in range(1, self.config.num_start_values + 1):
+                matching_results = [
+                    r for r in results
+                    if r.direction == direction and r.num_start_values == num_values
+                ]
+
+                if matching_results:
+                    r = matching_results[0]
+                    print(f"{r.num_start_values:<12} "
+                          f"{r.median_latency:<22.2f} "
+                          f"{r.edge_count:<15} "
+                          f"{r.node_count:<15}")
+
+        print("\n" + "=" * 90)
+
     def run_benchmark(self) -> List[BenchmarkResult]:
         """
         Run the complete benchmark suite.
@@ -445,6 +715,12 @@ def main():
     parser.add_argument('--directions', default='uni,bi',
                         help='Comma-separated directions to test (default: uni,bi)')
 
+    # Benchmark mode
+    parser.add_argument('--multivalue-mode', action='store_true',
+                        help='Run multi-value benchmark (uses IN clause with incrementally added values)')
+    parser.add_argument('--multivalue-depth', type=int, default=3,
+                        help='Fixed maxDepth for multi-value benchmark (default: 3)')
+
     # Output options
     parser.add_argument('--output', '-o', help='Output file for JSON report')
     parser.add_argument('--quiet', '-q', action='store_true', help='Suppress detailed output')
@@ -482,14 +758,24 @@ def main():
         # Create benchmark instance
         benchmark = GraphLookupBenchmark(config)
 
-        # Run benchmark
-        results = benchmark.run_benchmark()
+        if args.multivalue_mode:
+            # Run multi-value benchmark
+            results = benchmark.run_multivalue_benchmark(max_depth=args.multivalue_depth)
 
-        # Print summary table
-        benchmark.print_summary_table(results)
+            # Print summary table
+            benchmark.print_multivalue_summary_table(results)
 
-        # Generate and save report
-        report = benchmark.generate_report(results)
+            # Generate and save report
+            report = benchmark.generate_multivalue_report(results, max_depth=args.multivalue_depth)
+        else:
+            # Run standard benchmark
+            results = benchmark.run_benchmark()
+
+            # Print summary table
+            benchmark.print_summary_table(results)
+
+            # Generate and save report
+            report = benchmark.generate_report(results)
 
         if args.output:
             with open(args.output, 'w') as f:

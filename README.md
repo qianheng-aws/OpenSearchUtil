@@ -211,6 +211,8 @@ python -m benchmark.graphlookup_benchmark \
 | `--directions` | uni,bi | 测试的方向 |
 | `--output` | None | JSON 报告输出文件 |
 | `--quiet` | False | 静默模式 |
+| `--multivalue-mode` | False | 启用多值 benchmark 模式 |
+| `--multivalue-depth` | 3 | 多值模式的固定 maxDepth |
 
 ### 程序化使用
 
@@ -244,6 +246,35 @@ benchmark.print_summary_table(results)
 report = benchmark.generate_report(results)
 ```
 
+### Multi-Value Benchmark 模式
+
+除了标准的单值 benchmark，还支持多值 benchmark 模式。该模式测试使用 `IN` 子句同时从多个起始点开始遍历的性能。
+
+```bash
+# 运行多值 benchmark（使用默认 maxDepth=3）
+python -m benchmark.graphlookup_benchmark --multivalue-mode
+
+# 指定 maxDepth
+python -m benchmark.graphlookup_benchmark --multivalue-mode --multivalue-depth 5
+
+# 完整配置
+python -m benchmark.graphlookup_benchmark \
+    --multivalue-mode \
+    --multivalue-depth 3 \
+    --vertex-index person \
+    --edge-index connection \
+    --num-start-values 10 \
+    --directions "uni,bi"
+```
+
+多值 benchmark 的测试流程：
+1. 随机选取 N 个起始点
+2. 逐步增加起始值数量：先用 1 个值测试，再用 2 个值，依此类推直到 N 个值
+3. 每个配置运行多次，取中位数
+4. 使用固定的 maxDepth（默认为 3）
+
+查询格式从 `where id = {value}` 变为 `where id in (val1, val2, ...)`
+
 ### 输出示例
 
 ```
@@ -265,6 +296,30 @@ maxDepth   Avg Latency (ms)   Median (ms)     Min (ms)     Max (ms)     Avg Coun
 --------------------------------------------------------------------------------
 0          15.80              14.90           10.50        22.30        150
 1          45.30              42.80           35.60        58.90        450
+...
+```
+
+#### Multi-Value Benchmark 输出示例
+
+```
+==========================================================================================
+MULTI-VALUE BENCHMARK SUMMARY
+==========================================================================================
+
+--- Direction: uni ---
+# Values     Median Latency (ms)    Edges           Nodes
+------------------------------------------------------------------------------------------
+1            45.32                  800             450
+2            78.56                  1500            820
+3            112.45                 2200            1150
+...
+10           345.67                 6500            3200
+
+--- Direction: bi ---
+# Values     Median Latency (ms)    Edges           Nodes
+------------------------------------------------------------------------------------------
+1            52.18                  1200            650
+2            98.34                  2400            1300
 ...
 ```
 
@@ -387,6 +442,9 @@ python -m benchmark.graphlookup_benchmark \
           --runs-per-test 3 \
           --max-depths "0,1,3,5,10" \
           --directions "uni,bi" 2>&1
+
+# Run multi-value benchmark (uses IN clause with incrementally added values)
+python -m benchmark.graphlookup_benchmark --multivalue-mode --multivalue-depth 3
 ```
 
 See source files for full documentation.
