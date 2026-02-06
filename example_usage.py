@@ -8,8 +8,8 @@ CSVToOpenSearchImporter classes to import data files into OpenSearch.
 
 import os
 import pandas as pd
-from parquet_to_opensearch import ParquetToOpenSearchImporter
-from csv_to_opensearch import CSVToOpenSearchImporter
+from ingest.parquet_to_opensearch import ParquetToOpenSearchImporter
+from ingest.csv_to_opensearch import CSVToOpenSearchImporter
 
 
 def create_sample_parquet_file():
