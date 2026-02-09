@@ -39,6 +39,7 @@ class BenchmarkConfig:
     runs_per_test: int = 5
     max_depths: List[int] = field(default_factory=lambda: [0, 1, 3, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50])
     directions: List[str] = field(default_factory=lambda: ['uni', 'bi'])
+    use_pit: bool = False
 
 
 @dataclass
@@ -185,6 +186,7 @@ class GraphLookupBenchmark:
         Returns:
             Tuple of (latency_ms, edge_count, node_count)
         """
+        use_pit_line = "\n    usePIT=true" if self.config.use_pit else ""
         query = f"""source={self.config.vertex_index}
 | where {self.config.start_field} = {start_value}
 | graphLookup {self.config.edge_index}
@@ -193,7 +195,7 @@ class GraphLookupBenchmark:
     toField={self.config.to_field}
     depthField=depth
     maxDepth={max_depth}
-    direction={direction}
+    direction={direction}{use_pit_line}
     as reports
 | fields reports"""
 
@@ -298,6 +300,7 @@ class GraphLookupBenchmark:
         # Build IN clause: where id in (val1, val2, ...)
         values_str = ', '.join(str(v) for v in start_values)
 
+        use_pit_line = "\n    usePIT=true" if self.config.use_pit else ""
         query = f"""source={self.config.vertex_index}
 | where {self.config.start_field} in ({values_str})
 | graphLookup {self.config.edge_index}
@@ -307,7 +310,7 @@ class GraphLookupBenchmark:
     depthField=depth
     batchMode=true
     maxDepth={max_depth}
-    direction={direction}
+    direction={direction}{use_pit_line}
     as reports
 | fields reports"""
 
@@ -720,6 +723,8 @@ def main():
                         help='Run multi-value benchmark (uses IN clause with incrementally added values)')
     parser.add_argument('--multivalue-depth', type=int, default=3,
                         help='Fixed maxDepth for multi-value benchmark (default: 3)')
+    parser.add_argument('--use-pit', action='store_true',
+                        help='Enable usePIT=true in graphLookup queries')
 
     # Output options
     parser.add_argument('--output', '-o', help='Output file for JSON report')
@@ -747,7 +752,8 @@ def main():
         num_start_values=args.num_start_values,
         runs_per_test=args.runs_per_test,
         max_depths=max_depths,
-        directions=directions
+        directions=directions,
+        use_pit=args.use_pit
     )
 
     # Set log level
